@@ -152,31 +152,52 @@ class AzureAISearch:
         if select_fields is None:
             raise ValueError("select_fields must be provided")
         
-        payload: Dict[str, Any] = {
-            "search": keyword,
-            "count": True,
-            "vectorQueries": [
-                {
-                    "kind": "text",
-                    "text": keyword,
-                    "fields": "titleVector,contentVector",
-                    "queryRewrites": "generative",
-                    "exhaustive": True,
-                    "weight": 10,
-                    "k": 5
+        # Check if this is title index (simplified payload)
+        if self.index_name == "title_index":
+            payload: Dict[str, Any] = {
+                "search": keyword,
+                "count": True,
+                "vectorQueries": [
+                    {
+                        "kind": "text",
+                        "text": keyword,
+                        "fields": "titleVector"
                     }
-                    ],
-                    "queryType": "semantic",
-                    "captions": "extractive",
-                    "answers": "extractive|count-3",
-                    "semanticConfiguration": "test-all",
-                    "searchFields": "content, title",
-                    "scoringProfile": "content-scoring",
-                    "queryLanguage": "en-us",
-                    "select": ", ".join(select_fields),
-                    "queryRewrites": "generative",
-                    "debug": "queryRewrites"
+                ],
+                "queryType": "semantic",
+                "semanticConfiguration": "test-all",
+                "captions": "extractive",
+                "answers": "extractive|count-3",
+                "queryLanguage": "en-us",
+                "select": ", ".join(select_fields)
+            }
+        else:
+            # Full payload for content index
+            payload: Dict[str, Any] = {
+                "search": keyword,
+                "count": True,
+                "vectorQueries": [
+                    {
+                        "kind": "text",
+                        "text": keyword,
+                        "fields": "titleVector,contentVector",
+                        "queryRewrites": "generative",
+                        "exhaustive": True,
+                        "weight": 10,
+                        "k": 5
                     }
+                ],
+                "queryType": "semantic",
+                "captions": "extractive",
+                "answers": "extractive|count-3",
+                "semanticConfiguration": "test-all",
+                "searchFields": "content, title",
+                "scoringProfile": "content-scoring",
+                "queryLanguage": "en-us",
+                "select": ", ".join(select_fields),
+                "queryRewrites": "generative",
+                "debug": "queryRewrites"
+            }
 
         if filter_expression:
             payload["filter"] = filter_expression
