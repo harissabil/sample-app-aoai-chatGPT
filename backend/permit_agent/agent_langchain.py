@@ -1,7 +1,7 @@
 import os
 
 from datetime import datetime
-from backend import AzureAISearch, MultiSourceSearch
+from backend.azure_service_client.azure_ai_search import AzureAISearch, MultiSourceSearch
 
 from pydantic import BaseModel, Field
 
@@ -73,8 +73,10 @@ AZURE_OPENAI_SYSTEM_MESSAGE = """
         Main Knowledge:
         - Organization that available: PPN, PGN, KPI, SHU
 
+        IMPORTANT: After using any tool, you MUST provide a final answer to the user's question. 
+        Do not stop after just calling a tool. If the tool results are too long, summarize the key information.
           
-        Answer the user’s query as accurately as possible by the most relevance title while directly referencing the relevant pages.
+        Answer the user's query as accurately as possible by the most relevance title while directly referencing the relevant pages.
           
           """
 
@@ -82,7 +84,7 @@ llm = AzureChatOpenAI(
     azure_deployment="gpt-4.1",
     api_version="2024-12-01-preview",
     temperature=0,
-    max_tokens=1000,
+    max_tokens=2000,  # Increased from 1000 to handle longer responses
     timeout=500,
     max_retries=2
 )
