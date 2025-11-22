@@ -5,6 +5,13 @@ import os
 import sys
 from dotenv import load_dotenv
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
+
+from azure.cosmos import CosmosClient
+from backend.azure_service_client.azure_ai_search import AzureAISearch
+from backend.azure_service_client.azure_ai_search import MultiSourceSearch
+
 # Load environment variables
 load_dotenv()
 
@@ -13,8 +20,6 @@ async def test_cosmos_db_connection():
     print("=== Testing Cosmos DB Connection ===")
     
     try:
-        from azure.cosmos import CosmosClient
-        
         # Initialize client
         cosmos_client = CosmosClient(
             url=os.getenv("COSMOS_DB_URI"),
@@ -57,8 +62,6 @@ async def test_azure_search_connection():
     print("\n=== Testing Azure AI Search Connection ===")
     
     try:
-        from backend import AzureAISearch
-        
         # Test main search client
         search_endpoint = f"https://{os.getenv('AZURE_SEARCH_SERVICE')}.search.windows.net"
         
@@ -96,8 +99,6 @@ async def test_multi_source_search():
     print("\n=== Testing Multi-Source Search ===")
     
     try:
-        from backend import MultiSourceSearch
-        
         # Initialize multi-source client
         multi_client = MultiSourceSearch()
         

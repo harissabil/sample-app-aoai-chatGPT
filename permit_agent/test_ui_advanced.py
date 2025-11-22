@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 
 import asyncio
-import json
-import sys
-import os
 from flask import Flask, render_template_string, request, jsonify
 from dotenv import load_dotenv
 
@@ -50,7 +47,7 @@ HTML_TEMPLATE = """
     <div class="container">
         <div class="header">
             <h1>🤖 Permit Agent Test UI - Advanced</h1>
-            <p>Real integration with agent_langchain.py and backend.py</p>
+            <p>Real integration with agent_langchain.py and azure_ai_search.py</p>
         </div>
         
         <div id="status" class="status ready">
@@ -241,7 +238,7 @@ def initialize_agent():
     
     try:
         # Try to import and initialize agent
-        from agent_langchain import agent as imported_agent, classify_query_intent
+        from backend.permit_agent.agent_langchain import agent as imported_agent, classify_query_intent
         agent = imported_agent
         agent_ready = True
         print("✅ Agent initialized successfully")
