@@ -2,6 +2,8 @@ import copy
 import json
 import os
 import logging
+import sys
+import time
 import uuid
 import httpx
 import asyncio
@@ -16,14 +18,20 @@ from quart import (
     current_app,
 )
 
+# To import from parent directory first
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
+
 from openai import AsyncAzureOpenAI
 from azure.identity.aio import (
     DefaultAzureCredential,
     get_bearer_token_provider
 )
+from backend.permit_agent.agent_langchain import agent
 from backend.auth.auth_utils import get_authenticated_user_details
 from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.history.cosmosdbservice import CosmosConversationClient
+from backend.utils_langchain import convert_message, is_public, to_public_messages
 from backend.settings import (
     app_settings,
     MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
@@ -45,7 +53,7 @@ def create_app():
     app = Quart(__name__)
     app.register_blueprint(bp)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
-    
+
     @app.before_serving
     async def init():
         try:
@@ -55,7 +63,7 @@ def create_app():
             logging.exception("Failed to initialize CosmosDB client")
             app.cosmos_conversation_client = None
             raise e
-    
+
     return app
 
 
@@ -85,13 +93,12 @@ if DEBUG.lower() == "true":
 
 USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
 
-
 # Frontend Settings via Environment Variables
 frontend_settings = {
     "auth_enabled": app_settings.base_settings.auth_enabled,
     "feedback_enabled": (
-        app_settings.chat_history and
-        app_settings.chat_history.enable_feedback
+            app_settings.chat_history and
+            app_settings.chat_history.enable_feedback
     ),
     "ui": {
         "title": app_settings.ui.title,
@@ -106,23 +113,22 @@ frontend_settings = {
     "oyd_enabled": app_settings.base_settings.datasource_type,
 }
 
-
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
-
 
 azure_openai_tools = []
 azure_openai_available_tools = []
 
+
 # Initialize Azure OpenAI Client
 async def init_openai_client():
     azure_openai_client = None
-    
+
     try:
         # API version check
         if (
-            app_settings.azure_openai.preview_api_version
-            < MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
+                app_settings.azure_openai.preview_api_version
+                < MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
         ):
             raise ValueError(
                 f"The minimum supported Azure OpenAI preview API version is '{MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION}'"
@@ -130,8 +136,8 @@ async def init_openai_client():
 
         # Endpoint
         if (
-            not app_settings.azure_openai.endpoint and
-            not app_settings.azure_openai.resource
+                not app_settings.azure_openai.endpoint and
+                not app_settings.azure_openai.resource
         ):
             raise ValueError(
                 "AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_RESOURCE is required"
@@ -173,9 +179,9 @@ async def init_openai_client():
                 for tool in azure_openai_tools:
                     azure_openai_available_tools.append(tool["function"]["name"])
             else:
-                logging.error(f"An error occurred while getting OpenAI Function Call tools metadata: {response.status_code}")
+                logging.error(
+                    f"An error occurred while getting OpenAI Function Call tools metadata: {response.status_code}")
 
-        
         azure_openai_client = AsyncAzureOpenAI(
             api_version=app_settings.azure_openai.preview_api_version,
             api_key=aoai_api_key,
@@ -189,6 +195,7 @@ async def init_openai_client():
         logging.exception("Exception in Azure OpenAI initialization", e)
         azure_openai_client = None
         raise e
+
 
 async def openai_remote_azure_function_call(function_name, function_args):
     if app_settings.azure_openai.function_call_azure_functions_enabled is not True:
@@ -206,6 +213,7 @@ async def openai_remote_azure_function_call(function_name, function_args):
 
     return response.text
 
+
 async def init_cosmosdb_client():
     cosmos_conversation_client = None
     if app_settings.chat_history:
@@ -217,7 +225,7 @@ async def init_cosmosdb_client():
             if not app_settings.chat_history.account_key:
                 async with DefaultAzureCredential() as cred:
                     credential = cred
-                    
+
             else:
                 credential = app_settings.chat_history.account_key
 
@@ -238,7 +246,116 @@ async def init_cosmosdb_client():
     return cosmos_conversation_client
 
 
-def prepare_model_args(request_body, request_headers):
+# def prepare_model_args(request_body, request_headers):
+#     request_messages = request_body.get("messages", [])
+#     messages = []
+#     if not app_settings.datasource:
+#         messages = [
+#             {
+#                 "role": "system",
+#                 "content": app_settings.azure_openai.system_message
+#             }
+#         ]
+
+#     for message in request_messages:
+#         if message:
+#             match message["role"]:
+#                 case "user":
+#                     messages.append(
+#                         {
+#                             "role": message["role"],
+#                             "content": message["content"]
+#                         }
+#                     )
+#                 case "assistant" | "function" | "tool":
+#                     messages_helper = {}
+#                     messages_helper["role"] = message["role"]
+#                     if "name" in message:
+#                         messages_helper["name"] = message["name"]
+#                     if "function_call" in message:
+#                         messages_helper["function_call"] = message["function_call"]
+#                     messages_helper["content"] = message["content"]
+#                     if "context" in message:
+#                         context_obj = json.loads(message["context"])
+#                         messages_helper["context"] = context_obj
+
+#                     messages.append(messages_helper)
+
+
+#     user_security_context = None
+#     if (MS_DEFENDER_ENABLED):
+#         authenticated_user_details = get_authenticated_user_details(request_headers)
+#         application_name = app_settings.ui.title
+#         user_security_context = get_msdefender_user_json(authenticated_user_details, request_headers, application_name )  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
+
+
+#     model_args = {
+#         "messages": messages,
+#         "temperature": app_settings.azure_openai.temperature,
+#         "max_tokens": app_settings.azure_openai.max_tokens,
+#         "top_p": app_settings.azure_openai.top_p,
+#         "stop": app_settings.azure_openai.stop_sequence,
+#         "stream": app_settings.azure_openai.stream,
+#         "model": app_settings.azure_openai.model
+#     }
+
+#     if len(messages) > 0:
+#         if messages[-1]["role"] == "user":
+#             if app_settings.azure_openai.function_call_azure_functions_enabled and len(azure_openai_tools) > 0:
+#                 model_args["tools"] = azure_openai_tools
+
+#             if app_settings.datasource:
+#                 model_args["extra_body"] = {
+#                     "data_sources": [
+#                         app_settings.datasource.construct_payload_configuration(
+#                             request=request
+#                         )
+#                     ]
+#                 }
+
+#     model_args_clean = copy.deepcopy(model_args)
+#     if model_args_clean.get("extra_body"):
+#         secret_params = [
+#             "key",
+#             "connection_string",
+#             "embedding_key",
+#             "encoded_api_key",
+#             "api_key",
+#         ]
+#         for secret_param in secret_params:
+#             if model_args_clean["extra_body"]["data_sources"][0]["parameters"].get(
+#                 secret_param
+#             ):
+#                 model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+#                     secret_param
+#                 ] = "*****"
+#         authentication = model_args_clean["extra_body"]["data_sources"][0][
+#             "parameters"
+#         ].get("authentication", {})
+#         for field in authentication:
+#             if field in secret_params:
+#                 model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+#                     "authentication"
+#                 ][field] = "*****"
+#         embeddingDependency = model_args_clean["extra_body"]["data_sources"][0][
+#             "parameters"
+#         ].get("embedding_dependency", {})
+#         if "authentication" in embeddingDependency:
+#             for field in embeddingDependency["authentication"]:
+#                 if field in secret_params:
+#                     model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+#                         "embedding_dependency"
+#                     ]["authentication"][field] = "*****"
+
+#     if model_args.get("extra_body") is None:
+#         model_args["extra_body"] = {}
+#     if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
+#                 model_args["extra_body"]["user_security_context"]= user_security_context.to_dict()
+#     logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
+
+#     return model_args
+
+def prepare_model_args(request_body, request_headers, filtered_filepath=""):
     request_messages = request_body.get("messages", [])
     messages = []
     if not app_settings.datasource:
@@ -270,16 +387,15 @@ def prepare_model_args(request_body, request_headers):
                     if "context" in message:
                         context_obj = json.loads(message["context"])
                         messages_helper["context"] = context_obj
-                    
-                    messages.append(messages_helper)
 
+                    messages.append(messages_helper)
 
     user_security_context = None
     if (MS_DEFENDER_ENABLED):
         authenticated_user_details = get_authenticated_user_details(request_headers)
         application_name = app_settings.ui.title
-        user_security_context = get_msdefender_user_json(authenticated_user_details, request_headers, application_name )  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
-    
+        user_security_context = get_msdefender_user_json(authenticated_user_details, request_headers,
+                                                         application_name)  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
 
     model_args = {
         "messages": messages,
@@ -305,6 +421,12 @@ def prepare_model_args(request_body, request_headers):
                     ]
                 }
 
+                if len(model_args["extra_body"]["data_sources"]) > 0:
+                    for i, ds in enumerate(model_args["extra_body"]["data_sources"]):
+                        if ds and ds["type"] == "azure_search" and filtered_filepath != "":
+                            ds["parameters"]["filter"] = f"filepath eq '{filtered_filepath}'"
+                            model_args["extra_body"]["data_sources"][i] = ds
+
     model_args_clean = copy.deepcopy(model_args)
     if model_args_clean.get("extra_body"):
         secret_params = [
@@ -316,7 +438,7 @@ def prepare_model_args(request_body, request_headers):
         ]
         for secret_param in secret_params:
             if model_args_clean["extra_body"]["data_sources"][0]["parameters"].get(
-                secret_param
+                    secret_param
             ):
                 model_args_clean["extra_body"]["data_sources"][0]["parameters"][
                     secret_param
@@ -341,8 +463,127 @@ def prepare_model_args(request_body, request_headers):
 
     if model_args.get("extra_body") is None:
         model_args["extra_body"] = {}
-    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai     
-                model_args["extra_body"]["user_security_context"]= user_security_context.to_dict()
+    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
+        model_args["extra_body"]["user_security_context"] = user_security_context.to_dict()
+    logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
+
+    return model_args
+
+
+def prepare_model_args_filtered_filepath(request_body, request_headers):
+    request_messages = request_body.get("messages", [])
+    messages = []
+    if not app_settings.datasource:
+        messages = [
+            {
+                "role": "system",
+                "content": app_settings.azure_openai.system_message
+            }
+        ]
+
+    for message in request_messages:
+        if message:
+            match message["role"]:
+                case "user":
+                    messages.append(
+                        {
+                            "role": message["role"],
+                            "content": f"{message['content']} (find the filepath)"
+                        }
+                    )
+                case "assistant" | "function" | "tool":
+                    messages_helper = {}
+                    messages_helper["role"] = message["role"]
+                    if "name" in message:
+                        messages_helper["name"] = message["name"]
+                    if "function_call" in message:
+                        messages_helper["function_call"] = message["function_call"]
+                    messages_helper["content"] = message["content"]
+                    if "context" in message:
+                        context_obj = json.loads(message["context"])
+                        messages_helper["context"] = context_obj
+
+                    messages.append(messages_helper)
+
+    user_security_context = None
+    if (MS_DEFENDER_ENABLED):
+        authenticated_user_details = get_authenticated_user_details(request_headers)
+        application_name = app_settings.ui.title
+        user_security_context = get_msdefender_user_json(authenticated_user_details, request_headers,
+                                                         application_name)  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
+
+    model_args = {
+        "messages": messages,
+        "temperature": app_settings.azure_openai.temperature,
+        "max_tokens": app_settings.azure_openai.max_tokens,
+        "top_p": app_settings.azure_openai.top_p,
+        "stop": app_settings.azure_openai.stop_sequence,
+        "stream": app_settings.azure_openai.stream,
+        "model": app_settings.azure_openai.model,
+    }
+
+    if len(messages) > 0:
+        if messages[-1]["role"] == "user":
+            if app_settings.azure_openai.function_call_azure_functions_enabled and len(azure_openai_tools) > 0:
+                model_args["tools"] = azure_openai_tools
+
+            if app_settings.datasource:
+                model_args["extra_body"] = {
+                    "data_sources": [
+                        app_settings.datasource.construct_payload_configuration(
+                            request=request
+                        )
+                    ]
+                }
+
+                if len(model_args["extra_body"]["data_sources"]) > 0:
+                    for i, ds in enumerate(model_args["extra_body"]["data_sources"]):
+                        if ds and ds["type"] == "azure_search":
+                            # ds["parameters"]["search_fields"] = "filepath"
+                            ds["parameters"]["query_type"] = "semantic"
+                            ds["parameters"]["fields_mapping"]["content_fields"] = ["filepath", "title"]
+                            ds["parameters"]["fields_mapping"]["vector_fields"] = ["titleVector"]
+
+                            model_args["extra_body"]["data_sources"][i] = ds
+
+    model_args_clean = copy.deepcopy(model_args)
+    if model_args_clean.get("extra_body"):
+        secret_params = [
+            "key",
+            "connection_string",
+            "embedding_key",
+            "encoded_api_key",
+            "api_key",
+        ]
+        for secret_param in secret_params:
+            if model_args_clean["extra_body"]["data_sources"][0]["parameters"].get(
+                    secret_param
+            ):
+                model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+                    secret_param
+                ] = "*****"
+        authentication = model_args_clean["extra_body"]["data_sources"][0][
+            "parameters"
+        ].get("authentication", {})
+        for field in authentication:
+            if field in secret_params:
+                model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+                    "authentication"
+                ][field] = "*****"
+        embeddingDependency = model_args_clean["extra_body"]["data_sources"][0][
+            "parameters"
+        ].get("embedding_dependency", {})
+        if "authentication" in embeddingDependency:
+            for field in embeddingDependency["authentication"]:
+                if field in secret_params:
+                    model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+                        "embedding_dependency"
+                    ]["authentication"][field] = "*****"
+
+    if model_args.get("extra_body") is None:
+        model_args["extra_body"] = {}
+    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
+        model_args["extra_body"]["user_security_context"] = user_security_context.to_dict()
     logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
 
     return model_args
@@ -357,7 +598,7 @@ async def promptflow_request(request):
         # Adding timeout for scenarios where response takes longer to come back
         logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
         async with httpx.AsyncClient(
-            timeout=float(app_settings.promptflow.response_timeout)
+                timeout=float(app_settings.promptflow.response_timeout)
         ) as client:
             pf_formatted_obj = convert_to_pf_format(
                 request,
@@ -369,7 +610,8 @@ async def promptflow_request(request):
             response = await client.post(
                 app_settings.promptflow.endpoint,
                 json={
-                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1]["inputs"][app_settings.promptflow.request_field_name],
+                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1]["inputs"][
+                        app_settings.promptflow.request_field_name],
                     "chat_history": pf_formatted_obj[:-1],
                 },
                 headers=headers,
@@ -390,8 +632,9 @@ async def process_function_call(response):
             # Check if function exists
             if tool_call.function.name not in azure_openai_available_tools:
                 continue
-            
-            function_response = await openai_remote_azure_function_call(tool_call.function.name, tool_call.function.arguments)
+
+            function_response = await openai_remote_azure_function_call(tool_call.function.name,
+                                                                        tool_call.function.arguments)
 
             # adding assistant response to messages
             messages.append(
@@ -404,7 +647,7 @@ async def process_function_call(response):
                     "content": None,
                 }
             )
-            
+
             # adding function response to messages
             messages.append(
                 {
@@ -413,10 +656,11 @@ async def process_function_call(response):
                     "content": function_response,
                 }
             )  # extend conversation with function response
-        
+
         return messages
-    
+
     return None
+
 
 async def send_chat_request(request_body, request_headers):
     filtered_messages = []
@@ -424,15 +668,24 @@ async def send_chat_request(request_body, request_headers):
     for message in messages:
         if message.get("role") != 'tool':
             filtered_messages.append(message)
-            
+
     request_body['messages'] = filtered_messages
-    model_args = prepare_model_args(request_body, request_headers)
+    # model_args = prepare_model_args(request_body, request_headers)
+    model_args_filtered_filepath = prepare_model_args_filtered_filepath(request_body, request_headers)
 
     try:
         azure_openai_client = await init_openai_client()
+        cc_result = await azure_openai_client.chat.completions.create(**model_args_filtered_filepath)
+        filtered_filepath = ""
+        if cc_result.choices and len(cc_result.choices) > 0:
+            citations = cc_result.choices[0].message.context.get('citations', [])
+            filtered_filepath = citations[0]['filepath'] if citations else ""
+
+        model_args = prepare_model_args(request_body, request_headers, filtered_filepath)
+
         raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
         response = raw_response.parse()
-        apim_request_id = raw_response.headers.get("apim-request-id") 
+        apim_request_id = raw_response.headers.get("apim-request-id")
     except Exception as e:
         logging.exception("Exception in send_chat_request")
         raise e
@@ -441,46 +694,135 @@ async def send_chat_request(request_body, request_headers):
 
 
 async def complete_chat_request(request_body, request_headers):
-    if app_settings.base_settings.use_promptflow:
-        response = await promptflow_request(request_body)
-        history_metadata = request_body.get("history_metadata", {})
-        return format_pf_non_streaming_response(
-            response,
-            history_metadata,
-            app_settings.promptflow.response_field_name,
-            app_settings.promptflow.citations_field_name
-        )
-    else:
-        response, apim_request_id = await send_chat_request(request_body, request_headers)
-        history_metadata = request_body.get("history_metadata", {})
-        non_streaming_response = format_non_streaming_response(response, history_metadata, apim_request_id)
+    """
+    Modified to use the LangGraph React Agent with proper message filtering.
+    Filters out tool messages and only returns the final AI response to the frontend.
+    """
+    try:
+        # 1. Extract Messages
+        messages = request_body.get("messages", [])
 
-        if app_settings.azure_openai.function_call_azure_functions_enabled:
-            function_response = await process_function_call(response)  # Add await here
+        # 2. Invoke the Agent
+        # We use ainvoke to call the agent asynchronously
+        result = await agent.ainvoke({"messages": messages})
 
-            if function_response:
-                request_body["messages"].extend(function_response)
+        # 3. Get all output messages from the agent
+        output_messages = result.get("messages", [])
 
-                response, apim_request_id = await send_chat_request(request_body, request_headers)
-                history_metadata = request_body.get("history_metadata", {})
-                non_streaming_response = format_non_streaming_response(response, history_metadata, apim_request_id)
+        # --- DEBUG LOGGING ---
+        logging.debug(f"Agent Output Message Count: {len(output_messages)}")
+        logging.debug(f"Message Types: {[m.type if hasattr(m, 'type') else type(m).__name__ for m in output_messages]}")
 
-    return non_streaming_response
+        # Log content of each message for debugging
+        for i, msg in enumerate(output_messages):
+            msg_type = msg.type if hasattr(msg, 'type') else type(msg).__name__
+            content_preview = str(msg.content)[:100] if msg.content else "<None>"
+            logging.debug(f"  Message {i}: {msg_type} - Content: {content_preview}")
+        # ---------------------
+
+        # 4. Filter out tool messages and system plumbing
+        # This removes ToolMessage and AIMessage with only tool_calls (no content)
+        public_messages = to_public_messages(output_messages)
+
+        logging.debug(f"Public Message Count: {len(public_messages)}")
+        if public_messages:
+            logging.debug(f"Last public message role: {public_messages[-1].get('role')}, content length: {len(str(public_messages[-1].get('content', '')))}")
+
+        # 5. Extract the final AI content from the last public message
+        final_content = ""
+        if public_messages:
+            # Get the last message which should be the final AI response
+            last_public_msg = public_messages[-1]
+            if last_public_msg.get("role") == "assistant":
+                final_content = last_public_msg.get("content", "")
+
+        # If we still don't have content, try to extract from the last AI message directly
+        if not final_content:
+            last_ai_msg = next(
+                (m for m in reversed(output_messages) if hasattr(m, 'type') and m.type == "ai" and m.content),
+                None
+            )
+            if last_ai_msg:
+                if isinstance(last_ai_msg.content, str):
+                    final_content = last_ai_msg.content
+                elif isinstance(last_ai_msg.content, list):
+                    # Handle list content (sometimes LangChain returns list of blocks)
+                    final_content = " ".join(
+                        [block.get("text", "") for block in last_ai_msg.content
+                         if isinstance(block, dict) and "text" in block]
+                    )
+
+        # 6. Safety Fallback
+        # The UI will crash if content is None or empty
+        if not final_content:
+            logging.warning("Agent did not generate a final response. This may be due to token limits or agent configuration.")
+            logging.warning(f"Last message types: {[m.type if hasattr(m, 'type') else type(m).__name__ for m in output_messages[-3:]]}")
+            final_content = "I apologize, but I couldn't generate a complete response. This may be due to the complexity of the query or the amount of data retrieved. Please try asking a more specific question or breaking your request into smaller parts."
+
+        # Log the final content being sent
+        logging.debug(f"Final content being sent to frontend (length: {len(final_content)}): {final_content[:200]}...")
+
+        # 7. Format Response for Frontend
+        response_obj = {
+            "id": str(uuid.uuid4()),
+            "model": "langchain-react-agent",
+            "created": int(time.time()),
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "messages": [  # Changed from 'message' to 'messages' (array)
+                        {
+                            "role": "assistant",
+                            "content": final_content
+                        }
+                    ]
+                }
+            ],
+            "history_metadata": request_body.get("history_metadata", {})
+        }
+
+        return response_obj
+
+    except Exception as e:
+        logging.exception("Error in complete_chat_request with LangChain Agent")
+        # Return a valid error structure so the frontend handles it gracefully
+        return {
+            "id": str(uuid.uuid4()),
+            "model": "error-handler",
+            "created": int(time.time()),
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "messages": [  # Changed from 'message' to 'messages' (array)
+                        {
+                            "role": "assistant",
+                            "content": f"An internal error occurred: {str(e)}"
+                        }
+                    ]
+                }
+            ]
+        }
+
 
 class AzureOpenaiFunctionCallStreamState():
     def __init__(self):
-        self.tool_calls = []                # All tool calls detected in the stream
-        self.tool_name = ""                 # Tool name being streamed
-        self.tool_arguments_stream = ""     # Tool arguments being streamed
-        self.current_tool_call = None       # JSON with the tool name and arguments currently being streamed
-        self.function_messages = []         # All function messages to be appended to the chat history
-        self.streaming_state = "INITIAL"    # Streaming state (INITIAL, STREAMING, COMPLETED)
+        self.tool_calls = []  # All tool calls detected in the stream
+        self.tool_name = ""  # Tool name being streamed
+        self.tool_arguments_stream = ""  # Tool arguments being streamed
+        self.current_tool_call = None  # JSON with the tool name and arguments currently being streamed
+        self.function_messages = []  # All function messages to be appended to the chat history
+        self.streaming_state = "INITIAL"  # Streaming state (INITIAL, STREAMING, COMPLETED)
 
 
-async def process_function_call_stream(completionChunk, function_call_stream_state, request_body, request_headers, history_metadata, apim_request_id):
+async def process_function_call_stream(completionChunk, function_call_stream_state, request_body, request_headers,
+                                       history_metadata, apim_request_id):
     if hasattr(completionChunk, "choices") and len(completionChunk.choices) > 0:
         response_message = completionChunk.choices[0].delta
-        
+
         # Function calling stream processing
         if response_message.tool_calls and function_call_stream_state.streaming_state in ["INITIAL", "STREAMING"]:
             function_call_stream_state.streaming_state = "STREAMING"
@@ -489,7 +831,8 @@ async def process_function_call_stream(completionChunk, function_call_stream_sta
                 if tool_call_chunk.id:
                     if function_call_stream_state.current_tool_call:
                         function_call_stream_state.tool_arguments_stream += tool_call_chunk.function.arguments if tool_call_chunk.function.arguments else ""
-                        function_call_stream_state.current_tool_call["tool_arguments"] = function_call_stream_state.tool_arguments_stream
+                        function_call_stream_state.current_tool_call[
+                            "tool_arguments"] = function_call_stream_state.tool_arguments_stream
                         function_call_stream_state.tool_arguments_stream = ""
                         function_call_stream_state.tool_name = ""
                         function_call_stream_state.tool_calls.append(function_call_stream_state.current_tool_call)
@@ -500,19 +843,21 @@ async def process_function_call_stream(completionChunk, function_call_stream_sta
                     }
                 else:
                     function_call_stream_state.tool_arguments_stream += tool_call_chunk.function.arguments if tool_call_chunk.function.arguments else ""
-                
+
         # Function call - Streaming completed
         elif response_message.tool_calls is None and function_call_stream_state.streaming_state == "STREAMING":
-            function_call_stream_state.current_tool_call["tool_arguments"] = function_call_stream_state.tool_arguments_stream
+            function_call_stream_state.current_tool_call[
+                "tool_arguments"] = function_call_stream_state.tool_arguments_stream
             function_call_stream_state.tool_calls.append(function_call_stream_state.current_tool_call)
-            
+
             for tool_call in function_call_stream_state.tool_calls:
-                tool_response = await openai_remote_azure_function_call(tool_call["tool_name"], tool_call["tool_arguments"])
+                tool_response = await openai_remote_azure_function_call(tool_call["tool_name"],
+                                                                        tool_call["tool_arguments"])
 
                 function_call_stream_state.function_messages.append({
                     "role": "assistant",
                     "function_call": {
-                        "name" : tool_call["tool_name"],
+                        "name": tool_call["tool_name"],
                         "arguments": tool_call["tool_arguments"]
                     },
                     "content": None
@@ -523,10 +868,10 @@ async def process_function_call_stream(completionChunk, function_call_stream_sta
                     "name": tool_call["tool_name"],
                     "content": tool_response,
                 })
-            
+
             function_call_stream_state.streaming_state = "COMPLETED"
             return function_call_stream_state.streaming_state
-        
+
         else:
             return function_call_stream_state.streaming_state
 
@@ -534,15 +879,17 @@ async def process_function_call_stream(completionChunk, function_call_stream_sta
 async def stream_chat_request(request_body, request_headers):
     response, apim_request_id = await send_chat_request(request_body, request_headers)
     history_metadata = request_body.get("history_metadata", {})
-    
+
     async def generate(apim_request_id, history_metadata):
         if app_settings.azure_openai.function_call_azure_functions_enabled:
             # Maintain state during function call streaming
             function_call_stream_state = AzureOpenaiFunctionCallStreamState()
-            
+
             async for completionChunk in response:
-                stream_state = await process_function_call_stream(completionChunk, function_call_stream_state, request_body, request_headers, history_metadata, apim_request_id)
-                
+                stream_state = await process_function_call_stream(completionChunk, function_call_stream_state,
+                                                                  request_body, request_headers, history_metadata,
+                                                                  apim_request_id)
+
                 # No function call, asistant response
                 if stream_state == "INITIAL":
                     yield format_stream_response(completionChunk, history_metadata, apim_request_id)
@@ -554,7 +901,7 @@ async def stream_chat_request(request_body, request_headers):
                     function_response, apim_request_id = await send_chat_request(request_body, request_headers)
                     async for functionCompletionChunk in function_response:
                         yield format_stream_response(functionCompletionChunk, history_metadata, apim_request_id)
-                
+
         else:
             async for completionChunk in response:
                 yield format_stream_response(completionChunk, history_metadata, apim_request_id)
@@ -564,15 +911,10 @@ async def stream_chat_request(request_body, request_headers):
 
 async def conversation_internal(request_body, request_headers):
     try:
-        if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
-            result = await stream_chat_request(request_body, request_headers)
-            response = await make_response(format_as_ndjson(result))
-            response.timeout = None
-            response.mimetype = "application/json-lines"
-            return response
-        else:
-            result = await complete_chat_request(request_body, request_headers)
-            return jsonify(result)
+        # Forces non-streaming use of the agent for now because
+        # converting React Agent events to NDJSON stream is complex.
+        result = await complete_chat_request(request_body, request_headers)
+        return jsonify(result)
 
     except Exception as ex:
         logging.exception(ex)
