@@ -93,7 +93,7 @@ cosmos_client = CosmosClient(
 )
 
 database_id = "permitMetadataDB"
-container_id = "permitMetadataContainer"
+container_id = "newPermitMetadataContainer"
 
 
 class AgentResponse(BaseModel):
