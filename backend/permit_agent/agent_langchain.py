@@ -36,7 +36,7 @@ cosmos_client = CosmosClient(
 )
 
 database_id = "permitMetadataDB"
-container_id = "permitMetadataContainer"
+container_id = "newPermitMetadataContainer"
 
 database = cosmos_client.get_database_client(database_id)
 container = database.get_container_client(container_id)
