@@ -68,7 +68,7 @@ AZURE_OPENAI_SYSTEM_MESSAGE = """
           """
 
 llm = AzureChatOpenAI(
-    azure_deployment="gpt-4.1",
+    azure_deployment="gpt-4o",
     api_version="2024-12-01-preview",
     temperature=0,
     max_tokens=1000,
